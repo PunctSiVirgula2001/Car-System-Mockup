@@ -1,3 +1,24 @@
-idf_component_register(SRCS "hello_world_main.c"
-                       PRIV_REQUIRES spi_flash
-                       INCLUDE_DIRS "")
+idf_component_register(
+    SRCS
+        "hello_world_main.c"
+        "tasks/app_tasks.c"
+        "hal/i2c/hal_i2c.c"
+        "hal/gpio_timers/hal_gpio_timers.c"
+        "drivers/oled_i2c/oled_i2c.c"
+        "drivers/rgb_led/rgb_led.c"
+        "drivers/rotary_encoder/rotary_encoder.c"
+        "drivers/hcsr04/hcsr04.c"
+        "drivers/motor_ctrl_i2c/motor_ctrl_i2c.c"
+    PRIV_REQUIRES spi_flash
+    INCLUDE_DIRS
+        "."
+        "tasks"
+        "config"
+        "hal/i2c"
+        "hal/gpio_timers"
+        "drivers/oled_i2c"
+        "drivers/rgb_led"
+        "drivers/rotary_encoder"
+        "drivers/hcsr04"
+        "drivers/motor_ctrl_i2c"
+)
