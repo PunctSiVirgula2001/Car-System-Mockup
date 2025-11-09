@@ -15,3 +15,7 @@ pytest_embedded_log/
 
 # idf-component-manager output
 dependencies.lock
+mockup-car-sim/sdkconfig.old
+mockup-car-sim/.vscode/settings.json
+
+mockup-car-sim/.vscode/c_cpp_properties.json

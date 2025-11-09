@@ -9,7 +9,7 @@ idf_component_register(
         "drivers/rotary_encoder/rotary_encoder.c"
         "drivers/hcsr04/hcsr04.c"
         "drivers/motor_ctrl_i2c/motor_ctrl_i2c.c"
-    PRIV_REQUIRES spi_flash
+    PRIV_REQUIRES driver esp_timer spi_flash esp_driver_ledc
     INCLUDE_DIRS
         "."
         "tasks"
