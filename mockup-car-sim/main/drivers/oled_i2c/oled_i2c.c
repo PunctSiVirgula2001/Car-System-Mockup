@@ -5,6 +5,7 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 #include "project_config.h"
 #include "oled_i2c.h"
 #include "esp_lcd_panel_vendor.h"
@@ -144,6 +145,23 @@ static void oled_draw_vline(int x, int y_start, int y_end)
 }
 
 
+static void oled_draw_rect_filled(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0)
+    {
+        return;
+    }
+
+    for (int yy = y; yy < y + h; ++yy)
+    {
+        for (int xx = x; xx < x + w; ++xx)
+        {
+            oled_set_pixel(s_oled_framebuffer, xx, yy);
+        }
+    }
+}
+
+
 static void oled_draw_rect_outline(int x, int y, int w, int h)
 {
     if (w <= 0 || h <= 0)
@@ -158,6 +176,38 @@ static void oled_draw_rect_outline(int x, int y, int w, int h)
 }
 
 
+/* Draw the triangular debug bar graph composed of outlined squares. */
+static void oled_draw_debug_graph(int origin_x, int last_line_y, uint8_t bar_graph_level)
+{
+    int graph_base_y = last_line_y + (int)OLED_GRAPH_BASE_OFFSET_Y;
+    int step = (int)OLED_GRAPH_SQUARE_SIZE + (int)OLED_GRAPH_SQUARE_SPACING;
+    int total_boxes = (int)OLED_GRAPH_SQUARE_ROWS * (int)OLED_GRAPH_SQUARE_COLUMNS; /* rectangular grid */
+
+    /* Clamp input percentage and compute how many boxes to fill. */
+    if (bar_graph_level > 100U)
+    {
+        bar_graph_level = 100U;
+    }
+    int boxes_to_fill = (total_boxes * (int)bar_graph_level + 99) / 100; /* round up to show progress */
+    int filled = 0;
+
+    for (int col = 0; col < (int)OLED_GRAPH_SQUARE_COLUMNS; ++col)
+    {
+        int box_x = origin_x + col * step;
+        for (int row = 0; row < (int)OLED_GRAPH_SQUARE_ROWS; ++row)
+        {
+            int row_y = graph_base_y + ((int)OLED_GRAPH_SQUARE_ROWS - 1 - row) * step; /* bottom to top */
+            if (filled < boxes_to_fill)
+            {
+                oled_draw_rect_filled(box_x, row_y, (int)OLED_GRAPH_SQUARE_SIZE, (int)OLED_GRAPH_SQUARE_SIZE);
+                ++filled;
+            }
+            oled_draw_rect_outline(box_x, row_y, (int)OLED_GRAPH_SQUARE_SIZE, (int)OLED_GRAPH_SQUARE_SIZE);
+        }
+    }
+}
+
+
 /* Initialise the 128x64 SSD1306 OLED panel and clear the screen. */
 void oled_init(void)
 {
@@ -166,7 +216,8 @@ void oled_init(void)
         return;
     }
 
-    esp_lcd_panel_io_i2c_config_t io_config = {
+    esp_lcd_panel_io_i2c_config_t io_config = 
+    {
         .dev_addr = OLED_I2C_ADDRESS,
         .scl_speed_hz = I2C_FREQ_HZ,
         .control_phase_bytes = 1,
@@ -174,11 +225,10 @@ void oled_init(void)
         .lcd_cmd_bits = OLED_CMD_PARAM_BITS,
         .lcd_param_bits = OLED_CMD_PARAM_BITS,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c_v2(i2c_bus_handle,
-                                                &io_config,
-                                                &s_oled_io_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c_v2(i2c_bus_handle, &io_config, &s_oled_io_handle));
 
-    esp_lcd_panel_dev_config_t panel_config = {
+    esp_lcd_panel_dev_config_t panel_config = 
+    {
         .bits_per_pixel = 1,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(s_oled_io_handle, &panel_config, &s_oled_panel_handle));
@@ -216,7 +266,7 @@ void oled_draw_hello(void)
 }
 
 
-void oled_draw_debug_screen(uint8_t set_speed_percent, bool hl_on, bool rev_on)
+void oled_draw_debug_screen(uint8_t set_speed_percent, bool hl_on, bool rev_on, bool emr_br_active, uint8_t bar_graph_level, uint8_t act_speed_percent, oled_option_select_t selected_option)
 {
     if (s_oled_panel_handle == NULL)
     {
@@ -230,26 +280,26 @@ void oled_draw_debug_screen(uint8_t set_speed_percent, bool hl_on, bool rev_on)
         set_speed_percent = 100U;
     }
 
+    /*------------ SET SPEED PERCENT STRINGIFY ------------ */
+
     /* Build dynamic strings for configuration values. */
     char sp_digits[4];
     uint8_t value = set_speed_percent;
-    uint8_t hundreds = value / 100U;
-    uint8_t tens = (value % 100U) / 10U;
-    uint8_t ones = value % 10U;
+    uint8_t hundreds = value / 100U;     /* Hundred digit : 0 or 1 */
+    uint8_t tens = (value % 100U) / 10U; /* Tens digit */
+    uint8_t ones = value % 10U;          /* Ones digit */
 
+    /* Format speed as three characters, e.g. "005", "100" */
     sp_digits[0] = (hundreds > 0U) ? (char)('0' + hundreds) : '0';
     sp_digits[1] = (char)('0' + tens);
     sp_digits[2] = (char)('0' + ones);
     sp_digits[3] = '\0';
+    /* Concatenate prefix with computed speed digits, e.g. SP:005 */
+    char line_sp[8]; /* "SP:" (3) + 3 digits + NUL */
+    snprintf(line_sp, sizeof(line_sp), "SP:%c%c%c", sp_digits[0], sp_digits[1], sp_digits[2]);
+    
 
-    char line_sp[8];
-    line_sp[0] = 'S';
-    line_sp[1] = 'P';
-    line_sp[2] = ':';
-    line_sp[3] = sp_digits[0];
-    line_sp[4] = sp_digits[1];
-    line_sp[5] = sp_digits[2];
-    line_sp[6] = '\0';
+    /*------------ HEADLIGHTS STATUS STRINGIFY ------------ */
 
     const char *hl_state = hl_on ? "ON" : "OFF";
     char line_hl[8];
@@ -260,6 +310,8 @@ void oled_draw_debug_screen(uint8_t set_speed_percent, bool hl_on, bool rev_on)
     line_hl[4] = hl_state[1];
     line_hl[5] = hl_state[2];
     line_hl[6] = '\0';
+
+    /*------------ REVERSE STATUS STRINGIFY ------------ */
 
     const char *rev_state = rev_on ? "ON" : "OFF";
     char line_rev[8];
@@ -272,50 +324,84 @@ void oled_draw_debug_screen(uint8_t set_speed_percent, bool hl_on, bool rev_on)
     line_rev[6] = rev_state[2];
     line_rev[7] = '\0';
 
-    /* Column titles */
+    /*------------ EMERGENCY BREAK STATUS STRINGIFY ------------ */
+    const char *emr_br_state = emr_br_active ? "ACTIVE" : "OFF";
+    char line_emr_br[14]; /* "EMR.BR:" (7) + "ACTIVE" (6) + NUL */
+    snprintf(line_emr_br, sizeof(line_emr_br), "EMR.BR:%s", emr_br_state);
+
+    /*------------ ACTUAL SPEED STRINGIFY ------------ */
+    if (act_speed_percent > 100U)
+    {
+        act_speed_percent = 100U;
+    }
+
+    char act_sp_digits[4];
+    value = act_speed_percent;
+    hundreds = value / 100U;     /* Hundred digit : 0 or 1 */
+    tens = (value % 100U) / 10U; /* Tens digit */
+    ones = value % 10U;          /* Ones digit */
+
+    act_sp_digits[0] = (hundreds > 0U) ? (char)('0' + hundreds) : '0';
+    act_sp_digits[1] = (char)('0' + tens);
+    act_sp_digits[2] = (char)('0' + ones);
+    act_sp_digits[3] = '\0';
+
+    char line_act_sp[11]; 
+    snprintf(line_act_sp, sizeof(line_act_sp), "ACT.SP:%c%c%c", act_sp_digits[0], act_sp_digits[1], act_sp_digits[2]);
+
+    /*------------ DRAW STATIC AND DYNAMIC CONTENT ------------ */
+
+    /* Draw DEBUG and CONFIG titles for collumns */
     oled_draw_text((int)OLED_CONFIG_HEADER_POS_X, (int)OLED_CONFIG_HEADER_POS_Y, "CONFIG");
     oled_draw_text((int)OLED_DEBUG_HEADER_POS_X, (int)OLED_DEBUG_HEADER_POS_Y, "DEBUG");
 
-    /* Divider lines */
+    /* Collumn divider lines */
     oled_draw_hline(0, (int)OLED_WIDTH_PIXELS - 1, (int)OLED_HEADER_LINE_Y);
     oled_draw_vline((int)OLED_SEPARATOR_POS_X, 0, (int)OLED_HEIGHT_PIXELS - 1);
 
-    /* Left column configuration text */
-    int config_y = (int)OLED_CONFIG_TEXT_START_Y;
+    /* Left CONFIG column text */
+    int config_y = (int)OLED_CONFIG_TEXT_START_Y + OLED_GRAPH_GAP_Y + 5U;
     oled_draw_text((int)OLED_CONFIG_TEXT_START_X, config_y, line_sp);
-    config_y += (int)(OLED_FONT_HEIGHT + 1U);
-    oled_draw_text((int)OLED_CONFIG_TEXT_START_X, config_y, line_hl);
-    config_y += (int)(OLED_FONT_HEIGHT + 1U);
-    oled_draw_text((int)OLED_CONFIG_TEXT_START_X, config_y, line_rev);
+    if(selected_option == OLED_CONFIG_OPTION_SPEED)
+    {
+        oled_draw_hline((int)OLED_CONFIG_TEXT_START_X, OLED_CONFIG_TEXT_START_X + OLED_TEXT_PIXEL_WIDTH("CONFIG"), (int)config_y + OLED_FONT_HEIGHT + 2); //underline
+    }
+    else
+    {
+        /* no underline */
+    }
 
-    /* Right column debug text */
-    int debug_y = (int)OLED_DEBUG_TEXT_START_Y;
+    config_y += (int)(OLED_FONT_HEIGHT + OLED_GRAPH_GAP_Y + 5U);
+    oled_draw_text((int)OLED_CONFIG_TEXT_START_X, config_y, line_hl);
+    if(selected_option == OLED_CONFIG_OPTION_HEADLIGHTS)
+    {
+        oled_draw_hline((int)OLED_CONFIG_TEXT_START_X, OLED_CONFIG_TEXT_START_X + OLED_TEXT_PIXEL_WIDTH("CONFIG"), (int)config_y + OLED_FONT_HEIGHT + 2); //underline
+    }
+    else
+    {
+        /* no underline */
+    }
+
+    config_y += (int)(OLED_FONT_HEIGHT + OLED_GRAPH_GAP_Y + 5U);
+    oled_draw_text((int)OLED_CONFIG_TEXT_START_X, config_y, line_rev);
+    if(selected_option == OLED_CONFIG_OPTION_REVERSE)
+    {
+        oled_draw_hline((int)OLED_CONFIG_TEXT_START_X, OLED_CONFIG_TEXT_START_X + OLED_TEXT_PIXEL_WIDTH("CONFIG"), (int)config_y + OLED_FONT_HEIGHT + 2); //underline
+    }
+    else
+    {
+        /* no underline */
+    }
+
+    /* Right DEBUG column text */
+    int debug_y = (int)OLED_DEBUG_TEXT_START_Y + OLED_GRAPH_GAP_Y;
     int debug_x = (int)OLED_DEBUG_TEXT_START_X;
-    oled_draw_text(debug_x, debug_y, "EMR.BR:ACTIVE");
-    debug_y += OLED_FONT_HEIGHT + 1;
-    oled_draw_text(debug_x, debug_y, "ACT.SP:100");
+    oled_draw_text(debug_x, debug_y, line_emr_br);
+    debug_y += (OLED_FONT_HEIGHT + OLED_GRAPH_GAP_Y);
+    oled_draw_text(debug_x, debug_y, line_act_sp);
 
     /* Square "bar graph" under debug text */
-    const int squares_cols = 8;
-    const int squares_rows = 5;
-    const int square_size = 4;
-    const int square_spacing = 1;
-
-    int graph_base_y = debug_y + (int)OLED_GRAPH_BASE_OFFSET_Y;
-
-    for (int row = 0; row < squares_rows; ++row)
-    {
-        int boxes_in_row = squares_cols - ((squares_rows - 1) - row);
-        int row_y = graph_base_y +
-                    (squares_rows - 1 - row) * (square_size + square_spacing);
-
-        for (int col = 0; col < boxes_in_row; ++col)
-        {
-            int box_x = debug_x +
-                        col * (square_size + square_spacing);
-            oled_draw_rect_outline(box_x, row_y, square_size, square_size);
-        }
-    }
+    oled_draw_debug_graph(debug_x, debug_y + (int)OLED_GRAPH_GAP_Y, bar_graph_level);
 
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_oled_panel_handle, 0, 0, OLED_WIDTH_PIXELS, OLED_HEIGHT_PIXELS, s_oled_framebuffer));
 }

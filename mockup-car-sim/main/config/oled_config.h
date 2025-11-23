@@ -6,6 +6,7 @@
  * Usage: Included indirectly via project_config.h in oled_i2c.c.
  */
 
+#include <string.h>
 #include "hal_i2c.h"
 
 /* OLED I2C Address */
@@ -22,6 +23,8 @@
 #define OLED_FONT_WIDTH      (5U)
 #define OLED_FONT_HEIGHT     (7U)
 #define OLED_FONT_SPACING_X  (1U)
+#define OLED_TEXT_PIXEL_WIDTH_FROM_LEN(len_chars) ((int)(((len_chars) == 0U) ? 0 : ((len_chars) * OLED_FONT_WIDTH) + (((len_chars) - 1U) * OLED_FONT_SPACING_X)))
+#define OLED_TEXT_PIXEL_WIDTH(string)                (OLED_TEXT_PIXEL_WIDTH_FROM_LEN(strlen(string)))
 
 /* Debug screen layout positions (in pixels) */
 typedef enum
@@ -44,14 +47,32 @@ typedef enum
     OLED_DEBUG_TEXT_START_X    = OLED_DEBUG_HEADER_POS_X,
     OLED_DEBUG_TEXT_START_Y    = OLED_HEADER_LINE_Y + 2U,
 
-    OLED_GRAPH_BASE_OFFSET_Y   = OLED_FONT_HEIGHT + 2U
+    OLED_GRAPH_BASE_OFFSET_Y   = OLED_FONT_HEIGHT + 2U,
+
+    /* Square graph configs.*/
+    OLED_GRAPH_SQUARE_COLUMNS = 16U,
+    OLED_GRAPH_SQUARE_ROWS    = 5U,
+    OLED_GRAPH_SQUARE_SIZE    = 4U,
+    OLED_GRAPH_SQUARE_SPACING = 1U,
+
+    /* Y axis gap between dynamic/static fields */
+    OLED_GRAPH_GAP_Y          = 4U
 } oled_params_position_t;
 
+
+/* Option selection */
+typedef enum
+{
+    OLED_CONFIG_OPTION_SPEED = 0U,
+    OLED_CONFIG_OPTION_HEADLIGHTS,
+    OLED_CONFIG_OPTION_REVERSE,
+    OLED_CONFIG_OPTION_NONE
+} oled_option_select_t;
 /* Glyph structure for font representation and selection. */
 typedef struct
 {
-    char character;
-    uint8_t rows[OLED_FONT_HEIGHT];
+    char character;                 /* ASCII character */
+    uint8_t rows[OLED_FONT_HEIGHT]; /* Bitmap rows for the character */
 } oled_glyph_t;
 
 /* Minimal 5x7 font for the characters we need (CONFIG/DEBUG screen). */
@@ -60,7 +81,7 @@ static const oled_glyph_t s_oled_glyphs[] = {
     { ' ', { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
     /* Digits */
     { '0', { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E } },
-    { '1', { 0x0E, 0x04, 0x04, 0x04, 0x04, 0x06, 0x04 } },
+    { '1', { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E } },
     { '2', { 0x0E, 0x11, 0x01, 0x0E, 0x10, 0x10, 0x1F } },
     { '3', { 0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E } },
     { '4', { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 } },
@@ -87,7 +108,7 @@ static const oled_glyph_t s_oled_glyphs[] = {
     { 'N', { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 } },
     { 'O', { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
     { 'P', { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 } },
-    { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x05, 0x09, 0x11 } },
+    { 'R', { 0x0F, 0x11, 0x11, 0x0F, 0x14, 0x12, 0x11 } },
     { 'S', { 0x1E, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
     { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
     { 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },

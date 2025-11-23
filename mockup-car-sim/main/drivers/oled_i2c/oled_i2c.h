@@ -11,6 +11,7 @@
 #include "esp_lcd_panel_io.h"
 #include "hal_i2c.h"
 #include "esp_lcd_io_i2c.h"
+#include "oled_config.h"
 
 /*
  * Framebuffer layout used by oled_set_pixel() + esp_lcd_panel_draw_bitmap():
@@ -46,5 +47,16 @@ void oled_init(void);
 /* Draw a centered "HELLO" message (demo). */
 void oled_draw_hello(void);
 
-/* Draw a simple CONFIG / DEBUG screen with text and a square "bar graph". */
-void oled_draw_debug_screen(uint8_t set_speed_percent, bool hl_on, bool rev_on);
+/*
+ * Draw the CONFIG / DEBUG screen:
+ * - Left column: set speed (0-100%), headlights ON/OFF, reverse ON/OFF.
+ * - Right column: static debug labels plus a triangular outlined square graph placeholder.
+ * - bar_graph_level fills the square graph (0-100%), act_sp shows current speed, emr_br_active flags emergency brake.
+ */
+void oled_draw_debug_screen(uint8_t set_speed_percent,
+                            bool hl_on,
+                            bool rev_on,
+                            bool emr_br_active,
+                            uint8_t bar_graph_level,
+                            uint8_t act_speed_percent,
+                            oled_option_select_t selected_option);
