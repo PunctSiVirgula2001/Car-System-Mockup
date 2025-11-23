@@ -60,7 +60,8 @@ int hal_pwm_init(hal_pwm_ch_t ch, uint32_t pin, uint32_t freq_hz, uint8_t resolu
 
 int hal_pwm_set_duty(hal_pwm_ch_t ch, uint32_t duty)
 {
-    if (ch < 0 || ch >= (hal_pwm_ch_t)LEDC_CHANNEL_MAX) {
+    if (ch < 0 || ch >= (hal_pwm_ch_t)LEDC_CHANNEL_MAX) 
+    {
         return -1;
     }
     esp_err_t err = ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)ch, duty);
@@ -76,12 +77,14 @@ int hal_pwm_set_duty(hal_pwm_ch_t ch, uint32_t duty)
 
 int hal_pwm_deinit(hal_pwm_ch_t ch)
 {
-    if (ch < 0 || ch >= (hal_pwm_ch_t)LEDC_CHANNEL_MAX) {
+    if (ch < 0 || ch >= (hal_pwm_ch_t)LEDC_CHANNEL_MAX) 
+    {
         return -1;
     }
     /* Stop output and set idle level low */
     esp_err_t err = ledc_stop(LEDC_LOW_SPEED_MODE, (ledc_channel_t)ch, 0);
-    if (err != ESP_OK) {
+    if (err != ESP_OK) 
+    {
         return -1;
     }
     return 0;
@@ -116,7 +119,8 @@ static bool s_gpio_isr_service_installed = false;
 
 static inline gpio_int_type_t map_edge(hal_gpio_edge_t edge)
 {
-    switch (edge) {
+    switch (edge) 
+    {
         case HAL_GPIO_EDGE_RISING:  return GPIO_INTR_POSEDGE;
         case HAL_GPIO_EDGE_FALLING: return GPIO_INTR_NEGEDGE;
         case HAL_GPIO_EDGE_ANY:     return GPIO_INTR_ANYEDGE;
