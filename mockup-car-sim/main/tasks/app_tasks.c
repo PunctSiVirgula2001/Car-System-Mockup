@@ -76,6 +76,21 @@ static void input_task(void *arg)
         if (xQueueReceive(queue_encoder_events, &value_from_queue, portMAX_DELAY) == pdPASS)
         {
             // Process the received encoder event
+            if(1 == value_from_queue)
+            {
+                TickType_t now = xTaskGetTickCount();
+                if ((now - last_button_tick) >= button_debounce_ticks)
+                {
+                    //ESP_LOGI(TAG, "Encoder button pressed");
+                    last_button_tick = now;
+                }
+            }
+            else
+            {
+                counter += value_from_queue/2;
+                ESP_LOGI(TAG, "Encoder event: value=%d, counter=%d", value_from_queue/2, counter);
+            }
+
             // Send the processed input to OLED task for displaying update
             if(xQueueSend(queue_oled_updates_from_input, &value_from_queue, portMAX_DELAY) != pdPASS)
             {
@@ -228,7 +243,7 @@ static void ui_task(void *arg)
                         break;
                     case ROTARY_MENU_NAV_SELECT:
                         rolling_through_options = !rolling_through_options;
-                        option_index_or_value = 0U;
+                        option_index_or_value = selected_option;
                         /* code */
                         break;
                     default:
@@ -249,7 +264,7 @@ static void ui_task(void *arg)
         }
 
         /* Redraw the OLED display with updated parameters */
-        oled_draw_debug_screen(set_speed_percent, hl_on, rev_on, emr_br_active, (uint8_t)emr_br_active, (uint8_t)bar_graph_level, selected_option);
+        oled_draw_debug_screen(set_speed_percent, hl_on, rev_on, emr_br_active, (uint8_t)set_speed_percent, (uint8_t)set_speed_percent, selected_option);
     }
 }
 
