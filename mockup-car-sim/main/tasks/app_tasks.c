@@ -208,17 +208,19 @@ static void sensors_task(void *arg)
     for (;;)
     {
         QueueSetMemberHandle_t active = xQueueSelectFromSet(queue_set_sensors, portMAX_DELAY);
-        sensor_data_t data = {0};
+        sensor_data_t data = {0}; // added emergency_brake field initialization
 
         if (active == (QueueSetMemberHandle_t)queue_sensor_forward &&
             xQueueReceive(queue_sensor_forward, &data, 0) == pdPASS)
         {
+            // TODO : move emergency_brake logic here from control task in order to pass also to the oled the EMERGENCY BRAKE status
             (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
             (void)xQueueSend(queue_sensor_events, &data, 0);
         }
         else if (active == (QueueSetMemberHandle_t)queue_sensor_backward &&
                  xQueueReceive(queue_sensor_backward, &data, 0) == pdPASS)
         {
+            // TODO : move emergency_brake logic here from control task in order to pass also to the oled the EMERGENCY BRAKE status
             (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
             (void)xQueueSend(queue_sensor_events, &data, 0);
         }
@@ -233,6 +235,10 @@ static void control_task(void *arg)
     control_cmd_t cmd = {0};
     sensor_data_t sensor = {0};
     QueueSetMemberHandle_t activated_member;
+    bool emergency_brake_active = false;
+    bool previous_state_fwd_led = false;
+    rgb_backward_mode_t prev_bwd_led = RGB_BWD_HALF_BRIGHT_RED;
+    bool cmd_initialized = false;
     for (;;)
     {
         activated_member = xQueueSelectFromSet(queue_set_control, portMAX_DELAY);
@@ -240,21 +246,61 @@ static void control_task(void *arg)
         if (activated_member == (QueueSetMemberHandle_t)queue_control_cmd &&
             xQueueReceive(queue_control_cmd, &cmd, 0) == pdPASS)
         {
-            /* TODO: LEDs once implemented. */
-            ESP_LOGI(TAG, "Control update: speed=%u%%, hl=%d, rev=%d",
-                     (unsigned)cmd.speed_percent,
-                     cmd.headlights_on,
-                     cmd.reverse_mode);
+            cmd_initialized = true;
+            // ESP_LOGI(TAG, "Control update: speed=%u%%, hl=%d, rev=%d",
+            //          (unsigned)cmd.speed_percent,
+            //          cmd.headlights_on,
+            //          cmd.reverse_mode);
+
+            if(cmd.headlights_on && previous_state_fwd_led == false)
+            {
+                rgb_led_set_forward(RGB_FWD_BRIGHT_WHITE);
+                previous_state_fwd_led = true;
+            }
+            else if(!cmd.headlights_on && previous_state_fwd_led == true)
+            {
+                 rgb_led_set_forward(RGB_FWD_OFF);
+                previous_state_fwd_led = false;
+            }
+            // Guard with emergency brake status, in order to see if we can send motor commands
             // TODO : Prepare motor commands based on speed_percent and reverse_mode + send to motor_task
-            /* TODO: LEDs once implemented. */
         }
         else if (activated_member == (QueueSetMemberHandle_t)queue_sensor_events &&
                  xQueueReceive(queue_sensor_events, &sensor, 0) == pdPASS)
         {
-            /* TODO: React to distance (emergency brake, etc.) */
-            ESP_LOGI(TAG, "Sensor: %s distance=%ucm",
-                     sensor.forward ? "FWD" : "BACK",
-                     (unsigned)sensor.distance);
+            if (!cmd_initialized)
+            {
+                /* Wait for a config command before acting on sensors. */
+                continue;
+            }
+
+            bool hazard_forward = sensor.forward && !cmd.reverse_mode && (sensor.distance < HCSR04_DISTANCE_TO_STOP_CM);
+            bool hazard_backward = sensor.backward && cmd.reverse_mode && (sensor.distance < HCSR04_DISTANCE_TO_STOP_CM);
+
+            bool emergency_now = hazard_forward || hazard_backward;
+            bool safe_for_direction = (!cmd.reverse_mode && sensor.forward && sensor.distance >= HCSR04_DISTANCE_TO_STOP_CM) ||
+                                      (cmd.reverse_mode && sensor.backward && sensor.distance >= HCSR04_DISTANCE_TO_STOP_CM);
+
+            if (emergency_now && !emergency_brake_active)
+            {
+                emergency_brake_active = true;
+                if (prev_bwd_led != RGB_BWD_BRIGHT_RED)
+                {
+                    rgb_led_set_backward(RGB_BWD_BRIGHT_RED);
+                    prev_bwd_led = RGB_BWD_BRIGHT_RED;
+                }
+                // TODO: Prepare motor command to stop + send to motor_task
+            }
+            else if (!emergency_now && emergency_brake_active && safe_for_direction)
+            {
+                emergency_brake_active = false;
+                if (prev_bwd_led != RGB_BWD_HALF_BRIGHT_RED)
+                {
+                    rgb_led_set_backward(RGB_BWD_HALF_BRIGHT_RED);
+                    prev_bwd_led = RGB_BWD_HALF_BRIGHT_RED;
+                }
+                // TODO: Prepare motor command to resume previous speed + send to motor_task
+            }
         }
     }
 }
@@ -266,6 +312,7 @@ static void motor_task(void *arg)
     for (;;)
     {
         vTaskDelay(pdMS_TO_TICKS(120));
+        // TODO: Implement motor control via I2C based on commands from control task
     }
 }
 
@@ -318,11 +365,20 @@ static void ui_task(void *arg)
             if (xQueueReceive(queue_oled_updates_from_sensors, &sensor_value, 0) == pdPASS)
             {
                 /* Use distance to populate debug visuals for now. */
-                if (sensor_value.distance > 100U)
+                if (sensor_value.distance > 50U)
                 {
-                    sensor_value.distance = 100U;
+                    sensor_value.distance = 50U;
                 }
-                oled_state.bar_graph_level = sensor_value.distance;
+
+                /* Update bar graph based on which mode is active. */
+                if (oled_state.rev_on && sensor_value.backward)
+                {
+                    oled_state.bar_graph_level = 2U*sensor_value.distance;
+                }
+                else if (!oled_state.rev_on && sensor_value.forward)
+                {
+                    oled_state.bar_graph_level = 2U*sensor_value.distance;
+                }
             }
         }
 
@@ -387,8 +443,12 @@ esp_err_t app_tasks_init(void)
     hcsr04_init();
     hcsr04_start_periodic_trigger();
 
-
-
+    /* Initialize RGB leds: FWD and BWD */
+    rgb_led_init();
+    rgb_led_set_backward(RGB_BWD_HALF_BRIGHT_RED); // Initial state for backward LED
+    rgb_led_set_forward(RGB_FWD_OFF);              // Initial state for forward LED
+ 
+    /* Create application tasks pinned to specific cores. */
     ok = xTaskCreatePinnedToCore(input_task, "input_task", INPUT_TASK_STACK_SIZE, NULL, INPUT_TASK_PRIORITY, NULL, CORE_IO);
     if (ok != pdPASS)
     {
