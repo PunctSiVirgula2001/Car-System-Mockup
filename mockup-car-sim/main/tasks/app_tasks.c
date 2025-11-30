@@ -52,10 +52,15 @@ QueueHandle_t queue_encoder_events = NULL; // Queue for rotary encoder events, u
 
 QueueHandle_t queue_oled_updates_from_input = NULL;   // Queue for OLED display updates, used by UI task.
 QueueHandle_t queue_oled_updates_from_sensors = NULL; // Queue for OLED display updates, used by UI task.
-QueueSetHandle_t queue_set_oled_updates = NULL;       // Merged updates from multiple sources for OLED task.
+QueueSetHandle_t queue_set_oled_updates = NULL;       // Merged updates from multiple sources for OLED task : queue_oled_updates_from_input + queue_oled_updates_from_sensors.
+
 QueueHandle_t queue_control_cmd = NULL;               // Queue for passing config to control task.
+QueueHandle_t queue_sensor_events = NULL;             // Unified sensor data for control/supervision.
+
 QueueHandle_t queue_sensor_forward = NULL;            // HC-SR04 forward sensor readings.
 QueueHandle_t queue_sensor_backward = NULL;           // HC-SR04 backward sensor readings.
+QueueSetHandle_t queue_set_control = NULL;            // Control listens to config + sensors.
+QueueSetHandle_t queue_set_sensors = NULL;            // Sensors task waits on either forward/backward.
 
 
 
@@ -202,8 +207,21 @@ static void sensors_task(void *arg)
     ESP_LOGI(TAG, "Sensors task started");
     for (;;)
     {
-        // TODO: Read distance sensors from queues populated by HC-SR04 ISRs
-        vTaskDelay(pdMS_TO_TICKS(150));
+        QueueSetMemberHandle_t active = xQueueSelectFromSet(queue_set_sensors, portMAX_DELAY);
+        sensor_data_t data = {0};
+
+        if (active == (QueueSetMemberHandle_t)queue_sensor_forward &&
+            xQueueReceive(queue_sensor_forward, &data, 0) == pdPASS)
+        {
+            (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
+            (void)xQueueSend(queue_sensor_events, &data, 0);
+        }
+        else if (active == (QueueSetMemberHandle_t)queue_sensor_backward &&
+                 xQueueReceive(queue_sensor_backward, &data, 0) == pdPASS)
+        {
+            (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
+            (void)xQueueSend(queue_sensor_events, &data, 0);
+        }
     }
 }
 
@@ -213,18 +231,30 @@ static void control_task(void *arg)
     (void)arg;
     ESP_LOGI(TAG, "Control task started");
     control_cmd_t cmd = {0};
+    sensor_data_t sensor = {0};
+    QueueSetMemberHandle_t activated_member;
     for (;;)
     {
-        /* Block until input provides a new configuration. */
-        if (xQueueReceive(queue_control_cmd, &cmd, portMAX_DELAY) == pdPASS)
+        activated_member = xQueueSelectFromSet(queue_set_control, portMAX_DELAY);
+
+        if (activated_member == (QueueSetMemberHandle_t)queue_control_cmd &&
+            xQueueReceive(queue_control_cmd, &cmd, 0) == pdPASS)
         {
-            /* TODO: Drive motor / LEDs once implemented. */
+            /* TODO: LEDs once implemented. */
             ESP_LOGI(TAG, "Control update: speed=%u%%, hl=%d, rev=%d",
                      (unsigned)cmd.speed_percent,
                      cmd.headlights_on,
                      cmd.reverse_mode);
             // TODO : Prepare motor commands based on speed_percent and reverse_mode + send to motor_task
-            // TODO : Prepare LED commands based on headlights_on + send to ui_task
+            /* TODO: LEDs once implemented. */
+        }
+        else if (activated_member == (QueueSetMemberHandle_t)queue_sensor_events &&
+                 xQueueReceive(queue_sensor_events, &sensor, 0) == pdPASS)
+        {
+            /* TODO: React to distance (emergency brake, etc.) */
+            ESP_LOGI(TAG, "Sensor: %s distance=%ucm",
+                     sensor.forward ? "FWD" : "BACK",
+                     (unsigned)sensor.distance);
         }
     }
 }
@@ -319,10 +349,14 @@ esp_err_t app_tasks_init(void)
 
     /* Control/config/state queues */
     queue_control_cmd = xQueueCreate(5, sizeof(control_cmd_t));
+    queue_sensor_events = xQueueCreate(10, sizeof(sensor_data_t));
 
-    /* Sensor queues */
+    /* Sensor queues  : Updated from ISRs */
     queue_sensor_forward = xQueueCreate(5, sizeof(sensor_data_t));
     queue_sensor_backward = xQueueCreate(5, sizeof(sensor_data_t));
+    queue_set_sensors = xQueueCreateSet(10);
+    xQueueAddToSet(queue_sensor_forward, queue_set_sensors);
+    xQueueAddToSet(queue_sensor_backward, queue_set_sensors);
 
     /* Queues and queue set for OLED updates from multiple sources: input/sensors */
     queue_oled_updates_from_input = xQueueCreate(5, sizeof(oled_update_t));
@@ -330,6 +364,11 @@ esp_err_t app_tasks_init(void)
     queue_set_oled_updates = xQueueCreateSet(10);
     xQueueAddToSet(queue_oled_updates_from_input, queue_set_oled_updates);
     xQueueAddToSet(queue_oled_updates_from_sensors, queue_set_oled_updates);
+
+    /* Queue set for control (config + sensors) */
+    queue_set_control = xQueueCreateSet(15);
+    xQueueAddToSet(queue_control_cmd, queue_set_control);
+    xQueueAddToSet(queue_sensor_events, queue_set_control);
 
     ESP_LOGI(TAG, "Creating application tasks");
 
@@ -341,7 +380,14 @@ esp_err_t app_tasks_init(void)
     /* Initialize OLED screen. Set as I2C slave. */
     oled_init();
 
+    /* Initialize rotary encoder */
     rotary_encoder_init();
+
+    /* Initialize HC-SR04 sensors */
+    hcsr04_init();
+    hcsr04_start_periodic_trigger();
+
+
 
     ok = xTaskCreatePinnedToCore(input_task, "input_task", INPUT_TASK_STACK_SIZE, NULL, INPUT_TASK_PRIORITY, NULL, CORE_IO);
     if (ok != pdPASS)
@@ -350,12 +396,12 @@ esp_err_t app_tasks_init(void)
         return ESP_FAIL;
     }
 
-    // ok = xTaskCreatePinnedToCore(sensors_task, "sensors_task", SENSORS_TASK_STACK_SIZE, NULL, SENSORS_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
-    // if (ok != pdPASS)
-    // {
-    //     ESP_LOGE(TAG, "Failed to create sensors_task");
-    //     return ESP_FAIL;
-    // }
+    ok = xTaskCreatePinnedToCore(sensors_task, "sensors_task", SENSORS_TASK_STACK_SIZE, NULL, SENSORS_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
+    if (ok != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create sensors_task");
+        return ESP_FAIL;
+    }
 
     ok = xTaskCreatePinnedToCore(control_task, "control_task", CONTROL_TASK_STACK_SIZE, NULL, CONTROL_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
     if (ok != pdPASS)

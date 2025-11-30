@@ -20,4 +20,8 @@
 #define HCSR04_CM_PER_US           (58U)    /* Conversion factor: microseconds to centimeters */
 #define HCSR04_TRIGGER_PERIOD_MS   (50U)    /* Period between sensor triggers in milliseconds */
 
-
+typedef struct {
+    uint8_t distance;
+    bool forward;
+    bool backward;
+} sensor_data_t;
