@@ -52,6 +52,7 @@ QueueHandle_t queue_encoder_events = NULL; // Queue for rotary encoder events, u
 
 QueueHandle_t queue_oled_updates_from_input = NULL;   // Queue for OLED display updates, used by UI task.
 QueueHandle_t queue_oled_updates_from_sensors = NULL; // Queue for OLED display updates, used by UI task.
+QueueHandle_t queue_oled_updates_from_motor = NULL;   // Queue for OLED display updates, used by UI task. TODO: i2c motor feedback
 QueueSetHandle_t queue_set_oled_updates = NULL;       // Merged updates from multiple sources for OLED task : queue_oled_updates_from_input + queue_oled_updates_from_sensors.
 
 QueueHandle_t queue_control_cmd = NULL;               // Queue for passing config to control task.
@@ -205,24 +206,52 @@ static void sensors_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "Sensors task started");
+    sensor_data_t prev_fwd = {0};
+    sensor_data_t prev_bwd = {0};
+    bool have_prev_fwd = false;
+    bool have_prev_bwd = false;
     for (;;)
     {
         QueueSetMemberHandle_t active = xQueueSelectFromSet(queue_set_sensors, portMAX_DELAY);
-        sensor_data_t data = {0}; // added emergency_brake field initialization
+        sensor_data_t data = {0}; // includes emergency_brake field
 
         if (active == (QueueSetMemberHandle_t)queue_sensor_forward &&
             xQueueReceive(queue_sensor_forward, &data, 0) == pdPASS)
         {
-            // TODO : move emergency_brake logic here from control task in order to pass also to the oled the EMERGENCY BRAKE status
-            (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
-            (void)xQueueSend(queue_sensor_events, &data, 0);
+            if (data.distance > 100U)
+            {
+                data.distance = 100U;
+            }
+            data.emergency_brake = (data.distance < HCSR04_DISTANCE_TO_STOP_CM);
+            bool changed = !have_prev_fwd ||
+                           prev_fwd.distance != data.distance ||
+                           prev_fwd.emergency_brake != data.emergency_brake;
+            if (changed)
+            {
+                (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
+                (void)xQueueSend(queue_sensor_events, &data, 0);
+                prev_fwd = data;
+                have_prev_fwd = true;
+            }
         }
         else if (active == (QueueSetMemberHandle_t)queue_sensor_backward &&
                  xQueueReceive(queue_sensor_backward, &data, 0) == pdPASS)
         {
-            // TODO : move emergency_brake logic here from control task in order to pass also to the oled the EMERGENCY BRAKE status
-            (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
-            (void)xQueueSend(queue_sensor_events, &data, 0);
+            if (data.distance > 100U)
+            {
+                data.distance = 100U;
+            }
+            data.emergency_brake = (data.distance < HCSR04_DISTANCE_TO_STOP_CM);
+            bool changed = !have_prev_bwd ||
+                           prev_bwd.distance != data.distance ||
+                           prev_bwd.emergency_brake != data.emergency_brake;
+            if (changed)
+            {
+                (void)xQueueSend(queue_oled_updates_from_sensors, &data, 0);
+                (void)xQueueSend(queue_sensor_events, &data, 0);
+                prev_bwd = data;
+                have_prev_bwd = true;
+            }
         }
     }
 }
@@ -274,12 +303,12 @@ static void control_task(void *arg)
                 continue;
             }
 
-            bool hazard_forward = sensor.forward && !cmd.reverse_mode && (sensor.distance < HCSR04_DISTANCE_TO_STOP_CM);
-            bool hazard_backward = sensor.backward && cmd.reverse_mode && (sensor.distance < HCSR04_DISTANCE_TO_STOP_CM);
-
-            bool emergency_now = hazard_forward || hazard_backward;
-            bool safe_for_direction = (!cmd.reverse_mode && sensor.forward && sensor.distance >= HCSR04_DISTANCE_TO_STOP_CM) ||
-                                      (cmd.reverse_mode && sensor.backward && sensor.distance >= HCSR04_DISTANCE_TO_STOP_CM);
+            /* Sensors already tagged emergency_brake; honor it per current direction. */
+            bool emergency_now = (sensor.emergency_brake &&
+                                  ((sensor.forward && !cmd.reverse_mode) ||
+                                   (sensor.backward && cmd.reverse_mode)));
+            bool safe_for_direction = (!cmd.reverse_mode && sensor.forward && !sensor.emergency_brake) ||
+                                      (cmd.reverse_mode && sensor.backward && !sensor.emergency_brake);
 
             if (emergency_now && !emergency_brake_active)
             {
@@ -288,8 +317,8 @@ static void control_task(void *arg)
                 {
                     rgb_led_set_backward(RGB_BWD_BRIGHT_RED);
                     prev_bwd_led = RGB_BWD_BRIGHT_RED;
+                    // TODO: Prepare motor command to stop + send to motor_task
                 }
-                // TODO: Prepare motor command to stop + send to motor_task
             }
             else if (!emergency_now && emergency_brake_active && safe_for_direction)
             {
@@ -298,8 +327,8 @@ static void control_task(void *arg)
                 {
                     rgb_led_set_backward(RGB_BWD_HALF_BRIGHT_RED);
                     prev_bwd_led = RGB_BWD_HALF_BRIGHT_RED;
+                    // TODO: Prepare motor command to resume previous speed + send to motor_task
                 }
-                // TODO: Prepare motor command to resume previous speed + send to motor_task
             }
         }
     }
@@ -330,6 +359,8 @@ static void ui_task(void *arg)
         .selected_option = OLED_CONFIG_OPTION_SPEED
     };
 
+    bool emergency_brake_active_prev = false;
+
     /* Initial look of the display when the app just started. */
     oled_draw_debug_screen(oled_state.set_speed_percent,
                            oled_state.hl_on,
@@ -355,6 +386,7 @@ static void ui_task(void *arg)
             if (xQueueReceive(queue_oled_updates_from_input, &input_update, 0) == pdPASS)
             {
                 oled_state = input_update;
+                oled_state.emr_br_active = emergency_brake_active_prev;
             }
 
         }
@@ -374,11 +406,16 @@ static void ui_task(void *arg)
                 if (oled_state.rev_on && sensor_value.backward)
                 {
                     oled_state.bar_graph_level = 2U*sensor_value.distance;
+                    oled_state.emr_br_active = sensor_value.emergency_brake;
+                    emergency_brake_active_prev = sensor_value.emergency_brake;
                 }
                 else if (!oled_state.rev_on && sensor_value.forward)
                 {
                     oled_state.bar_graph_level = 2U*sensor_value.distance;
+                    oled_state.emr_br_active = sensor_value.emergency_brake;
+                    emergency_brake_active_prev = sensor_value.emergency_brake;
                 }
+
             }
         }
 
