@@ -43,6 +43,7 @@ static void control_task(void *arg); /* Control Task */
 static void motor_task(void *arg);   /* Motor Task */
 static void ui_task(void *arg);      /* User Interface Task */
 
+
 /* -------------------------------------------------------------------------- */
 /* Queue Handles                                                              */
 /* -------------------------------------------------------------------------- */
@@ -52,8 +53,10 @@ QueueHandle_t queue_encoder_events = NULL; // Queue for rotary encoder events, u
 QueueHandle_t queue_oled_updates_from_input = NULL;   // Queue for OLED display updates, used by UI task.
 QueueHandle_t queue_oled_updates_from_sensors = NULL; // Queue for OLED display updates, used by UI task.
 QueueSetHandle_t queue_set_oled_updates = NULL;       // Merged updates from multiple sources for OLED task.
+QueueHandle_t queue_control_cmd = NULL;               // Queue for passing config to control task.
+QueueHandle_t queue_sensor_forward = NULL;            // HC-SR04 forward sensor readings.
+QueueHandle_t queue_sensor_backward = NULL;           // HC-SR04 backward sensor readings.
 
-// queue set for merging data for OLED updates
 
 
 /* -------------------------------------------------------------------------- */
@@ -64,39 +67,130 @@ QueueSetHandle_t queue_set_oled_updates = NULL;       // Merged updates from mul
 static void input_task(void *arg)
 {
     (void)arg;
-    int counter = 0;
-    int value_from_queue = 0;
     TickType_t last_button_tick = 0;
     const TickType_t button_debounce_ticks = pdMS_TO_TICKS(50); /* 50 ms software debounce */
+    bool adjusting_value = false;
+
+    /* Current configuration state derived from user input. */
+    oled_update_t oled_state = {
+        .set_speed_percent = 0U,
+        .hl_on = false,
+        .rev_on = false,
+        .emr_br_active = false,
+        .bar_graph_level = 0U,
+        .act_speed_percent = 0U,
+        .selected_option = OLED_CONFIG_OPTION_SPEED
+    };
+
+    control_cmd_t control_state = {
+        .speed_percent = oled_state.set_speed_percent,
+        .reverse_mode = oled_state.rev_on,
+        .headlights_on = oled_state.hl_on
+    };
+
+    /* Publish defaults so UI and control tasks know initial state. */
+    (void)xQueueSend(queue_oled_updates_from_input, &oled_state, 0);
+    (void)xQueueSend(queue_control_cmd, &control_state, 0);
+
     ESP_LOGI(TAG, "Input task started");
 
     for (;;)
     {
+        int value_from_queue = 0;
         /* Wait indefinitely for encoder events pushed from the ISR callback. */
         if (xQueueReceive(queue_encoder_events, &value_from_queue, portMAX_DELAY) == pdPASS)
         {
-            // Process the received encoder event
-            if(1 == value_from_queue)
+            /* Work on copies so we can detect changes at the end. */
+            oled_update_t prev_oled_state = oled_state;
+            int8_t step = 0;
+
+            switch (value_from_queue)
             {
-                TickType_t now = xTaskGetTickCount();
-                if ((now - last_button_tick) >= button_debounce_ticks)
+                case ROTARY_MENU_NAV_SELECT:
                 {
-                    //ESP_LOGI(TAG, "Encoder button pressed");
-                    last_button_tick = now;
+                    TickType_t now = xTaskGetTickCount();
+                    if ((now - last_button_tick) >= button_debounce_ticks)
+                    {
+                        adjusting_value = !adjusting_value;
+                        last_button_tick = now;
+                    }
+                    break;
+                }
+                case ROTARY_MENU_NAV_STEP_NEXT:
+                case ROTARY_MENU_NAV_STEP_PREV:
+                {
+                    int8_t step = (value_from_queue == ROTARY_MENU_NAV_STEP_NEXT) ? 1 : -1;
+                    if (!adjusting_value)
+                    {
+                        int8_t next_option = (int8_t)oled_state.selected_option + step;
+                        if (next_option >= (int8_t)OLED_CONFIG_OPTION_SPEED && next_option <= (int8_t)OLED_CONFIG_OPTION_REVERSE)
+                        {
+                            oled_state.selected_option = (oled_option_select_t)next_option;
+                        }
+                    }
+                    else
+                    {
+                        switch (oled_state.selected_option)
+                        {
+                            case OLED_CONFIG_OPTION_SPEED:
+                            {
+                                int16_t new_speed = (int16_t)oled_state.set_speed_percent + (int16_t)(step);
+                                if (new_speed < 0) { new_speed = 0; }
+                                if (new_speed > 100) { new_speed = 100; }
+                                oled_state.set_speed_percent = (uint8_t)new_speed;
+                                break;
+                            }
+                            case OLED_CONFIG_OPTION_HEADLIGHTS:
+                                oled_state.hl_on = !oled_state.hl_on;
+                                break;
+                            case OLED_CONFIG_OPTION_REVERSE:
+                                oled_state.rev_on = !oled_state.rev_on;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    break;
+                }
+                default:
+                    /* Ignore unexpected events. */
+                    break;
+            }
+
+            /* Detect changes and send updates as needed. */
+            bool oled_changed =
+                (prev_oled_state.set_speed_percent != oled_state.set_speed_percent) ||
+                (prev_oled_state.hl_on != oled_state.hl_on) ||
+                (prev_oled_state.rev_on != oled_state.rev_on) ||
+                (prev_oled_state.emr_br_active != oled_state.emr_br_active) ||
+                (prev_oled_state.bar_graph_level != oled_state.bar_graph_level) ||
+                (prev_oled_state.act_speed_percent != oled_state.act_speed_percent) ||
+                (prev_oled_state.selected_option != oled_state.selected_option);
+
+            if (oled_changed)
+            {
+                if (xQueueSend(queue_oled_updates_from_input, &oled_state, portMAX_DELAY) != pdPASS)
+                {
+                    ESP_LOGW(TAG, "Failed to send input update to OLED queue");
                 }
             }
-            else
-            {
-                counter += value_from_queue/2;
-                ESP_LOGI(TAG, "Encoder event: value=%d, counter=%d", value_from_queue/2, counter);
-            }
 
-            // Send the processed input to OLED task for displaying update
-            if(xQueueSend(queue_oled_updates_from_input, &value_from_queue, portMAX_DELAY) != pdPASS)
-            {
-                ESP_LOGW(TAG, "Failed to send input update to OLED queue");
-            }
+            bool control_changed =
+                (prev_oled_state.set_speed_percent != oled_state.set_speed_percent) ||
+                (prev_oled_state.hl_on != oled_state.hl_on) ||
+                (prev_oled_state.rev_on != oled_state.rev_on);
 
+            if (control_changed)
+            {
+                control_state.speed_percent = oled_state.set_speed_percent;
+                control_state.reverse_mode = oled_state.rev_on;
+                control_state.headlights_on = oled_state.hl_on;
+
+                if (xQueueSend(queue_control_cmd, &control_state, portMAX_DELAY) != pdPASS)
+                {
+                    ESP_LOGW(TAG, "Failed to send control command");
+                }
+            }
         }
     }
 }
@@ -108,6 +202,7 @@ static void sensors_task(void *arg)
     ESP_LOGI(TAG, "Sensors task started");
     for (;;)
     {
+        // TODO: Read distance sensors from queues populated by HC-SR04 ISRs
         vTaskDelay(pdMS_TO_TICKS(150));
     }
 }
@@ -117,9 +212,20 @@ static void control_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "Control task started");
+    control_cmd_t cmd = {0};
     for (;;)
     {
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* Block until input provides a new configuration. */
+        if (xQueueReceive(queue_control_cmd, &cmd, portMAX_DELAY) == pdPASS)
+        {
+            /* TODO: Drive motor / LEDs once implemented. */
+            ESP_LOGI(TAG, "Control update: speed=%u%%, hl=%d, rev=%d",
+                     (unsigned)cmd.speed_percent,
+                     cmd.headlights_on,
+                     cmd.reverse_mode);
+            // TODO : Prepare motor commands based on speed_percent and reverse_mode + send to motor_task
+            // TODO : Prepare LED commands based on headlights_on + send to ui_task
+        }
     }
 }
 // TODO: Execute motor commands (I2C) prepared by control task
@@ -133,43 +239,31 @@ static void motor_task(void *arg)
     }
 }
 
-static inline void clamp_option_index(int8_t *index, int8_t input_value)
-{
-    int8_t new_index = (int8_t)(*index + input_value);
-    if (new_index < (int8_t)OLED_CONFIG_OPTION_SPEED)
-    {
-        new_index = (int8_t)OLED_CONFIG_OPTION_SPEED;
-    }
-    else if (new_index > (int8_t)OLED_CONFIG_OPTION_REVERSE)
-    {
-        new_index = (int8_t)OLED_CONFIG_OPTION_REVERSE;
-    }
-    *index = new_index;
-}
-
 // TODO: Refresh OLED display / RGB LED patterns
 static void ui_task(void *arg)
 {
-    /* Parameters for drawing */
-    uint8_t set_speed_percent = 0;
-    bool hl_on = false;
-    bool rev_on = false;
-    bool emr_br_active = false;
-    uint8_t bar_graph_level = 0;
-    uint8_t act_speed_percent = 0;
-    oled_option_select_t selected_option = OLED_CONFIG_OPTION_NONE;
+    /* Parameters for drawing driven entirely by messages from input/sensors. */
+    oled_update_t oled_state = {
+        .set_speed_percent = 0U,
+        .hl_on = false,
+        .rev_on = false,
+        .emr_br_active = false,
+        .bar_graph_level = 0U,
+        .act_speed_percent = 0U,
+        .selected_option = OLED_CONFIG_OPTION_SPEED
+    };
 
     /* Initial look of the display when the app just started. */
-    oled_draw_debug_screen(set_speed_percent, hl_on, rev_on, emr_br_active, (uint8_t)emr_br_active, (uint8_t)bar_graph_level, selected_option);
-    
+    oled_draw_debug_screen(oled_state.set_speed_percent,
+                           oled_state.hl_on,
+                           oled_state.rev_on,
+                           oled_state.emr_br_active,
+                           oled_state.bar_graph_level,
+                           oled_state.act_speed_percent,
+                           oled_state.selected_option);
+
     /* OLED queue set update handler */
     QueueSetMemberHandle_t activated_member;
-
-    /* Menu navigation states */
-
-    /* Draw the initial CONFIG / DEBUG screen on the OLED. */
-    bool rolling_through_options = true;
-    int8_t option_index_or_value = 0;
 
     ESP_LOGI(TAG, "UI task started");
     for (;;)
@@ -180,91 +274,36 @@ static void ui_task(void *arg)
         /* Process input updates - config related only */
         if (activated_member == (QueueSetMemberHandle_t)queue_oled_updates_from_input)
         {
-            int input_value = 0;
-            if (xQueueReceive(queue_oled_updates_from_input, &input_value, 0) == pdPASS)
+            oled_update_t input_update = {0};
+            if (xQueueReceive(queue_oled_updates_from_input, &input_update, 0) == pdPASS)
             {
-                switch (input_value)
-                {
-                    case ROTARY_MENU_NAV_STEP_NEXT:
-                        if(rolling_through_options)
-                        {
-                            clamp_option_index((int8_t *)&option_index_or_value, 1);
-                            selected_option = (oled_option_select_t)option_index_or_value;
-                        }
-                        else
-                        {
-                            // adjust the selected option value
-                            option_index_or_value++;
-                            if(selected_option == OLED_CONFIG_OPTION_SPEED)
-                            {
-                                if(option_index_or_value > 100U)
-                                {
-                                    option_index_or_value = 100U;
-                                }
-                                set_speed_percent = (uint8_t)option_index_or_value;
-                            }
-                            else if(selected_option == OLED_CONFIG_OPTION_HEADLIGHTS)
-                            {
-                                hl_on = (option_index_or_value % 2U) ? true : false;
-                            }
-                            else if(selected_option == OLED_CONFIG_OPTION_REVERSE)
-                            {
-                                rev_on = (option_index_or_value % 2U) ? true : false;
-                            }
-                        }
-                        break;
-                    case ROTARY_MENU_NAV_STEP_PREV:
-                        if(rolling_through_options)
-                        {
-                            clamp_option_index((int8_t *)&option_index_or_value, -1);
-                            selected_option = (oled_option_select_t)option_index_or_value;
-                        }
-                        else
-                        {
-                            // adjust the selected option value
-                            option_index_or_value--;
-                            if(option_index_or_value < 0)
-                            {
-                                option_index_or_value = 0;
-                            }
-                            if(selected_option == OLED_CONFIG_OPTION_SPEED)
-                            {
-                                set_speed_percent = (uint8_t)option_index_or_value;
-                            }
-                            else if(selected_option == OLED_CONFIG_OPTION_HEADLIGHTS)
-                            {
-                                hl_on = (option_index_or_value % 2U) ? true : false;
-                            }
-                            else if(selected_option == OLED_CONFIG_OPTION_REVERSE)
-                            {
-                                rev_on = (option_index_or_value % 2U) ? true : false;
-                            }
-                        }
-                        break;
-                    case ROTARY_MENU_NAV_SELECT:
-                        rolling_through_options = !rolling_through_options;
-                        option_index_or_value = selected_option;
-                        /* code */
-                        break;
-                    default:
-                        break;
-                }
-
+                oled_state = input_update;
             }
 
         }
         /* Process sensor updates - debug related only */
         else if (activated_member == (QueueSetMemberHandle_t)queue_oled_updates_from_sensors)
         {
-            int sensor_value = 0;
+            sensor_data_t sensor_value = {0};
             if (xQueueReceive(queue_oled_updates_from_sensors, &sensor_value, 0) == pdPASS)
             {
-                // TODO: Update debug parameters based on sensor data
+                /* Use distance to populate debug visuals for now. */
+                if (sensor_value.distance > 100U)
+                {
+                    sensor_value.distance = 100U;
+                }
+                oled_state.bar_graph_level = sensor_value.distance;
             }
         }
 
         /* Redraw the OLED display with updated parameters */
-        oled_draw_debug_screen(set_speed_percent, hl_on, rev_on, emr_br_active, (uint8_t)set_speed_percent, (uint8_t)set_speed_percent, selected_option);
+        oled_draw_debug_screen(oled_state.set_speed_percent,
+                               oled_state.hl_on,
+                               oled_state.rev_on,
+                               oled_state.emr_br_active,
+                               oled_state.bar_graph_level,
+                               oled_state.act_speed_percent,
+                               oled_state.selected_option);
     }
 }
 
@@ -278,10 +317,17 @@ esp_err_t app_tasks_init(void)
     /* Queue for event triggered by rotary encoder. */
     queue_encoder_events = xQueueCreate(10, sizeof(int));
 
+    /* Control/config/state queues */
+    queue_control_cmd = xQueueCreate(5, sizeof(control_cmd_t));
+
+    /* Sensor queues */
+    queue_sensor_forward = xQueueCreate(5, sizeof(sensor_data_t));
+    queue_sensor_backward = xQueueCreate(5, sizeof(sensor_data_t));
+
     /* Queues and queue set for OLED updates from multiple sources: input/sensors */
-    queue_oled_updates_from_input = xQueueCreate(10, sizeof(int));
-    queue_oled_updates_from_sensors = xQueueCreate(10, sizeof(int));
-    queue_set_oled_updates = xQueueCreateSet(20);
+    queue_oled_updates_from_input = xQueueCreate(5, sizeof(oled_update_t));
+    queue_oled_updates_from_sensors = xQueueCreate(5, sizeof(sensor_data_t));
+    queue_set_oled_updates = xQueueCreateSet(10);
     xQueueAddToSet(queue_oled_updates_from_input, queue_set_oled_updates);
     xQueueAddToSet(queue_oled_updates_from_sensors, queue_set_oled_updates);
 
@@ -311,12 +357,12 @@ esp_err_t app_tasks_init(void)
     //     return ESP_FAIL;
     // }
 
-    // ok = xTaskCreatePinnedToCore(control_task, "control_task", CONTROL_TASK_STACK_SIZE, NULL, CONTROL_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
-    // if (ok != pdPASS)
-    // {
-    //     ESP_LOGE(TAG, "Failed to create control_task");
-    //     return ESP_FAIL;
-    // }
+    ok = xTaskCreatePinnedToCore(control_task, "control_task", CONTROL_TASK_STACK_SIZE, NULL, CONTROL_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
+    if (ok != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create control_task");
+        return ESP_FAIL;
+    }
 
     // ok = xTaskCreatePinnedToCore(motor_task, "motor_task", MOTOR_TASK_STACK_SIZE, NULL, MOTOR_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
     // if (ok != pdPASS)

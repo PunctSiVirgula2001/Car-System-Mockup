@@ -14,4 +14,10 @@
 #define GPIO_HC_SR04_BACKWARD_TRIG (5U)
 #define GPIO_HC_SR04_BACKWARD_ECHO (34U)
 
+/* HC-SR04 Configuration */
+#define HCSR04_TRIGGER_PULSE_US    (10U)    /* Trigger pulse duration in microseconds */
+#define HCSR04_TIMEOUT_MS          (30U)    /* Measurement timeout in milliseconds */
+#define HCSR04_CM_PER_US           (58U)    /* Conversion factor: microseconds to centimeters */
+#define HCSR04_TRIGGER_PERIOD_MS   (50U)    /* Period between sensor triggers in milliseconds */
+
 

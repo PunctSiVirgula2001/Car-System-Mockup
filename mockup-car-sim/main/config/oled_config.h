@@ -68,6 +68,7 @@ typedef enum
     OLED_CONFIG_OPTION_REVERSE,
     OLED_CONFIG_OPTION_NONE
 } oled_option_select_t;
+
 /* Glyph structure for font representation and selection. */
 typedef struct
 {
