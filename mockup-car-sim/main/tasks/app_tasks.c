@@ -13,8 +13,8 @@
 #define INPUT_TASK_STACK_SIZE   (2048)
 #define SENSORS_TASK_STACK_SIZE (2048)
 #define CONTROL_TASK_STACK_SIZE (2048)
-#define MOTOR_TASK_STACK_SIZE   (2048)
-#define UI_TASK_STACK_SIZE      (2048)
+#define MOTOR_TASK_STACK_SIZE   (4096)
+#define UI_TASK_STACK_SIZE      (4096)
 
 /* Priorities mapping per user spec:
  * Core 1: control(6) > motor(5) > sensors(4)
@@ -42,6 +42,13 @@ static void sensors_task(void *arg); /* Sensors Task */
 static void control_task(void *arg); /* Control Task */
 static void motor_task(void *arg);   /* Motor Task */
 static void ui_task(void *arg);      /* User Interface Task */
+static void motor_poll_timer_cb(TimerHandle_t xTimer); /* Timer to trigger motor polling */
+static void motor_action_enqueue(motor_ctrl_command_t command, uint8_t arg, bool has_arg);
+
+/* Polling interval for motor telemetry query. */
+static const TickType_t MOTOR_POLL_INTERVAL_TICKS =  pdMS_TO_TICKS(100);
+static const size_t MOTOR_SPEED_RESPONSE_LEN = 1U;
+static const size_t MOTOR_BRAKE_RESPONSE_LEN = 1U;
 
 
 /* -------------------------------------------------------------------------- */
@@ -62,6 +69,52 @@ QueueHandle_t queue_sensor_forward = NULL;            // HC-SR04 forward sensor 
 QueueHandle_t queue_sensor_backward = NULL;           // HC-SR04 backward sensor readings.
 QueueSetHandle_t queue_set_control = NULL;            // Control listens to config + sensors.
 QueueSetHandle_t queue_set_sensors = NULL;            // Sensors task waits on either forward/backward.
+QueueHandle_t queue_motor_responses = NULL;           // Responses from motor controller over I2C.
+QueueHandle_t queue_motor_cmd = NULL;                 // Commands to motor task (from tick hook/input).
+QueueHandle_t queue_motor_actions = NULL;             // Actions from control task to motor task.
+QueueSetHandle_t queue_set_motor = NULL;              // Motor task listens to commands + actions.
+
+static TimerHandle_t motor_poll_timer = NULL;         // Timer to trigger periodic motor polling.
+
+/* -------------------------------------------------------------------------- */
+/* Static Helpers (non-task)                                                  */
+/* -------------------------------------------------------------------------- */
+
+static void motor_poll_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    if (queue_motor_cmd != NULL)
+    {
+        motor_task_msg_t msg_speed = {
+            .type = MOTOR_TASK_MSG_READ_COMMAND,
+            .command = MOTOR_CMD_QUERY_SPEED,
+            .has_arg = false,
+            .arg = 0U,
+            .rx_len = MOTOR_SPEED_RESPONSE_LEN
+        };
+        motor_task_msg_t msg_brake = {
+            .type = MOTOR_TASK_MSG_READ_COMMAND,
+            .command = MOTOR_CMD_QUERY_BRAKE_STATUS,
+            .has_arg = false,
+            .arg = 0U,
+            .rx_len = MOTOR_BRAKE_RESPONSE_LEN
+        };
+        (void)xQueueSend(queue_motor_cmd, &msg_speed, 0);
+        (void)xQueueSend(queue_motor_cmd, &msg_brake, 0);
+    }
+}
+
+static void motor_action_enqueue(motor_ctrl_command_t command, uint8_t arg, bool has_arg)
+{
+    motor_task_msg_t msg = {
+        .type = MOTOR_TASK_MSG_SEND_ONLY,
+        .command = command,
+        .has_arg = has_arg,
+        .arg = arg,
+        .rx_len = 0U
+    };
+    (void)xQueueSend(queue_motor_actions, &msg, 0);
+}
 
 
 
@@ -268,6 +321,9 @@ static void control_task(void *arg)
     bool previous_state_fwd_led = false;
     rgb_backward_mode_t prev_bwd_led = RGB_BWD_HALF_BRIGHT_RED;
     bool cmd_initialized = false;
+    uint8_t last_speed_sent = 0U;
+    bool last_dir_sent = false;
+    bool brake_cmd_enqueued = false;
     for (;;)
     {
         activated_member = xQueueSelectFromSet(queue_set_control, portMAX_DELAY);
@@ -288,11 +344,23 @@ static void control_task(void *arg)
             }
             else if(!cmd.headlights_on && previous_state_fwd_led == true)
             {
-                 rgb_led_set_forward(RGB_FWD_OFF);
+                rgb_led_set_forward(RGB_FWD_OFF);
                 previous_state_fwd_led = false;
             }
             // Guard with emergency brake status, in order to see if we can send motor commands
-            // TODO : Prepare motor commands based on speed_percent and reverse_mode + send to motor_task
+            if (!emergency_brake_active)
+            {
+                if (!cmd_initialized || last_speed_sent != cmd.speed_percent)
+                {
+                    motor_action_enqueue(MOTOR_CMD_SET_SPEED, cmd.speed_percent, true);
+                    last_speed_sent = cmd.speed_percent;
+                }
+                if (!cmd_initialized || last_dir_sent != cmd.reverse_mode)
+                {
+                    motor_action_enqueue(MOTOR_CMD_SET_DIRECTION, cmd.reverse_mode ? 1U : 0U, true);
+                    last_dir_sent = cmd.reverse_mode;
+                }
+            }
         }
         else if (activated_member == (QueueSetMemberHandle_t)queue_sensor_events &&
                  xQueueReceive(queue_sensor_events, &sensor, 0) == pdPASS)
@@ -317,7 +385,11 @@ static void control_task(void *arg)
                 {
                     rgb_led_set_backward(RGB_BWD_BRIGHT_RED);
                     prev_bwd_led = RGB_BWD_BRIGHT_RED;
-                    // TODO: Prepare motor command to stop + send to motor_task
+                }
+                if (!brake_cmd_enqueued)
+                {
+                    motor_action_enqueue(MOTOR_CMD_ENABLE_BRAKE, 0U, false);
+                    brake_cmd_enqueued = true;
                 }
             }
             else if (!emergency_now && emergency_brake_active && safe_for_direction)
@@ -327,21 +399,74 @@ static void control_task(void *arg)
                 {
                     rgb_led_set_backward(RGB_BWD_HALF_BRIGHT_RED);
                     prev_bwd_led = RGB_BWD_HALF_BRIGHT_RED;
-                    // TODO: Prepare motor command to resume previous speed + send to motor_task
+                }
+                if (brake_cmd_enqueued)
+                {
+                    motor_action_enqueue(MOTOR_CMD_DISABLE_BRAKE, 0U, false);
+                    brake_cmd_enqueued = false;
                 }
             }
         }
     }
 }
-// TODO: Execute motor commands (I2C) prepared by control task
+
 static void motor_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "Motor task started");
+    motor_task_msg_t msg = {0};
+    uint32_t fail_count = 0;
+
     for (;;)
     {
-        vTaskDelay(pdMS_TO_TICKS(120));
-        // TODO: Implement motor control via I2C based on commands from control task
+        QueueSetMemberHandle_t activated = xQueueSelectFromSet(queue_set_motor, portMAX_DELAY);
+        if (activated == (QueueSetMemberHandle_t)queue_motor_cmd)
+        {
+            (void)xQueueReceive(queue_motor_cmd, &msg, 0);
+        }
+        else if (activated == (QueueSetMemberHandle_t)queue_motor_actions)
+        {
+            (void)xQueueReceive(queue_motor_actions, &msg, 0);
+        }
+        else
+        {
+            continue;
+        }
+
+        esp_err_t err = ESP_OK;
+        uint8_t arg = msg.arg;
+
+        if (msg.type == MOTOR_TASK_MSG_SEND_ONLY)
+        {
+            err = motor_ctrl_send_command(msg.command,
+                                          msg.has_arg ? &arg : NULL,
+                                          msg.has_arg ? 1U : 0U);
+                                              
+        }
+        else if (msg.type == MOTOR_TASK_MSG_READ_COMMAND)
+        {
+            err = motor_ctrl_send_command(msg.command,
+                                          msg.has_arg ? &arg : NULL,
+                                          msg.has_arg ? 1U : 0U);
+
+            if (err == ESP_OK)
+            {
+                size_t rx_len = msg.rx_len;
+                if (rx_len == 0U || rx_len > MOTOR_CTRL_MAX_RESP_LEN)
+                {
+                    rx_len = MOTOR_CTRL_MAX_RESP_LEN;
+                }
+
+                uint8_t rx_buf[MOTOR_CTRL_MAX_RESP_LEN] = {0};
+                err = motor_ctrl_receive_response(msg.command, rx_buf, rx_len);
+            }
+        }
+
+        if (err != ESP_OK && activated == (QueueSetMemberHandle_t)queue_motor_actions)
+        {
+            (void)xQueueSend(queue_motor_actions, &msg, 0);
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
     }
 }
 
@@ -406,16 +531,32 @@ static void ui_task(void *arg)
                 if (oled_state.rev_on && sensor_value.backward)
                 {
                     oled_state.bar_graph_level = 2U*sensor_value.distance;
-                    oled_state.emr_br_active = sensor_value.emergency_brake;
-                    emergency_brake_active_prev = sensor_value.emergency_brake;
+                    // oled_state.emr_br_active = sensor_value.emergency_brake;
+                    // emergency_brake_active_prev = sensor_value.emergency_brake;
                 }
                 else if (!oled_state.rev_on && sensor_value.forward)
                 {
                     oled_state.bar_graph_level = 2U*sensor_value.distance;
-                    oled_state.emr_br_active = sensor_value.emergency_brake;
-                    emergency_brake_active_prev = sensor_value.emergency_brake;
+                    // oled_state.emr_br_active = sensor_value.emergency_brake;
+                    // emergency_brake_active_prev = sensor_value.emergency_brake;
                 }
 
+            }
+        }
+        else if (activated_member == (QueueSetMemberHandle_t)queue_motor_responses)
+        {
+            motor_ctrl_response_t resp = {0};
+            if (xQueueReceive(queue_motor_responses, &resp, 0) == pdPASS)
+            {
+                if (resp.command == MOTOR_CMD_QUERY_SPEED && resp.length > 0U)
+                {
+                    oled_state.act_speed_percent = resp.data[0];
+                }
+                else if (resp.command == MOTOR_CMD_QUERY_BRAKE_STATUS && resp.length > 0U)
+                {
+                    oled_state.emr_br_active = (resp.data[0] != 0U);
+                    emergency_brake_active_prev = oled_state.emr_br_active;
+                }
             }
         }
 
@@ -454,9 +595,33 @@ esp_err_t app_tasks_init(void)
     /* Queues and queue set for OLED updates from multiple sources: input/sensors */
     queue_oled_updates_from_input = xQueueCreate(5, sizeof(oled_update_t));
     queue_oled_updates_from_sensors = xQueueCreate(5, sizeof(sensor_data_t));
-    queue_set_oled_updates = xQueueCreateSet(10);
+    queue_set_oled_updates = xQueueCreateSet(10 + MOTOR_CTRL_RESPONSE_QUEUE_LEN);
     xQueueAddToSet(queue_oled_updates_from_input, queue_set_oled_updates);
     xQueueAddToSet(queue_oled_updates_from_sensors, queue_set_oled_updates);
+
+    /* Motor command/action queues (to trigger motor control interrogation commands). */
+    queue_motor_cmd = xQueueCreate(10, sizeof(motor_task_msg_t));
+    queue_motor_actions = xQueueCreate(5, sizeof(motor_task_msg_t));
+    queue_set_motor = xQueueCreateSet(15);
+    xQueueAddToSet(queue_motor_cmd, queue_set_motor);
+    xQueueAddToSet(queue_motor_actions, queue_set_motor);
+
+    /* Timer-based polling of motor speed (100ms). */
+    motor_poll_timer = xTimerCreate("motor_poll",
+                                    MOTOR_POLL_INTERVAL_TICKS,
+                                    pdTRUE,
+                                    NULL,
+                                    motor_poll_timer_cb);
+    if (motor_poll_timer == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create motor poll timer");
+        return ESP_FAIL;
+    }
+    if (xTimerStart(motor_poll_timer, 0) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to start motor poll timer");
+        return ESP_FAIL;
+    }
 
     /* Queue set for control (config + sensors) */
     queue_set_control = xQueueCreateSet(15);
@@ -466,9 +631,23 @@ esp_err_t app_tasks_init(void)
     ESP_LOGI(TAG, "Creating application tasks");
 
     BaseType_t ok;
+    esp_err_t err;
 
     /* Initialize I2C bus. Set ESP32 as master. */
     hal_i2c_init();
+
+    /* Initialize motor controller over I2C. */
+    err = motor_ctrl_init();
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Motor controller init failed");
+        return err;
+    }
+    queue_motor_responses = motor_ctrl_get_response_queue();
+    if (queue_set_oled_updates != NULL && queue_motor_responses != NULL)
+    {
+        (void)xQueueAddToSet(queue_motor_responses, queue_set_oled_updates);
+    }
 
     /* Initialize OLED screen. Set as I2C slave. */
     oled_init();
@@ -507,12 +686,12 @@ esp_err_t app_tasks_init(void)
         return ESP_FAIL;
     }
 
-    // ok = xTaskCreatePinnedToCore(motor_task, "motor_task", MOTOR_TASK_STACK_SIZE, NULL, MOTOR_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
-    // if (ok != pdPASS)
-    // {
-    //     ESP_LOGE(TAG, "Failed to create motor_task");
-    //     return ESP_FAIL;
-    // }
+    ok = xTaskCreatePinnedToCore(motor_task, "motor_task", MOTOR_TASK_STACK_SIZE, NULL, MOTOR_TASK_PRIORITY, NULL, CORE_HIGH_PERF);
+    if (ok != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create motor_task");
+        return ESP_FAIL;
+    }
 
     ok = xTaskCreatePinnedToCore(ui_task, "ui_task", UI_TASK_STACK_SIZE, NULL, UI_TASK_PRIORITY, NULL, CORE_IO);
     if (ok != pdPASS)

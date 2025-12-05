@@ -44,6 +44,19 @@ typedef struct {
     bool headlights_on;
 } control_cmd_t;
 
+typedef enum {
+    MOTOR_TASK_MSG_SEND_ONLY = 0,
+    MOTOR_TASK_MSG_READ_COMMAND
+} motor_task_msg_type_t;
+
+typedef struct {
+    motor_task_msg_type_t type;
+    motor_ctrl_command_t command;
+    bool has_arg;
+    uint8_t arg;
+    size_t rx_len;
+} motor_task_msg_t;
+
 
 extern QueueHandle_t queue_encoder_events;
 extern QueueHandle_t queue_oled_updates_from_input;
@@ -54,6 +67,10 @@ extern QueueHandle_t queue_sensor_events;
 extern QueueHandle_t queue_sensor_forward;
 extern QueueHandle_t queue_sensor_backward;
 extern QueueSetHandle_t queue_set_control;
+extern QueueHandle_t queue_motor_responses;
+extern QueueHandle_t queue_motor_cmd;
+extern QueueHandle_t queue_motor_actions;
+extern QueueSetHandle_t queue_set_motor;
 
 
 /* Entry point to create all application tasks. */
