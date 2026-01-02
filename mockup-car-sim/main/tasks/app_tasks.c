@@ -46,7 +46,7 @@ static void motor_poll_timer_cb(TimerHandle_t xTimer); /* Timer to trigger motor
 static void motor_action_enqueue(motor_ctrl_command_t command, uint8_t arg, bool has_arg);
 
 /* Polling interval for motor telemetry query. */
-static const TickType_t MOTOR_POLL_INTERVAL_TICKS =  pdMS_TO_TICKS(100);
+static const TickType_t MOTOR_POLL_INTERVAL_TICKS =  pdMS_TO_TICKS(500);
 static const size_t MOTOR_SPEED_RESPONSE_LEN = 1U;
 static const size_t MOTOR_BRAKE_RESPONSE_LEN = 1U;
 
@@ -577,6 +577,7 @@ static void ui_task(void *arg)
 
 esp_err_t app_tasks_init(void)
 {
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for system to stabilize
     ESP_LOGI(TAG, "Creating queues and queue sets the tasks.");
     /* Queue for event triggered by rotary encoder. */
     queue_encoder_events = xQueueCreate(10, sizeof(int));
@@ -606,23 +607,6 @@ esp_err_t app_tasks_init(void)
     xQueueAddToSet(queue_motor_cmd, queue_set_motor);
     xQueueAddToSet(queue_motor_actions, queue_set_motor);
 
-    /* Timer-based polling of motor speed (100ms). */
-    motor_poll_timer = xTimerCreate("motor_poll",
-                                    MOTOR_POLL_INTERVAL_TICKS,
-                                    pdTRUE,
-                                    NULL,
-                                    motor_poll_timer_cb);
-    if (motor_poll_timer == NULL)
-    {
-        ESP_LOGE(TAG, "Failed to create motor poll timer");
-        return ESP_FAIL;
-    }
-    if (xTimerStart(motor_poll_timer, 0) != pdPASS)
-    {
-        ESP_LOGE(TAG, "Failed to start motor poll timer");
-        return ESP_FAIL;
-    }
-
     /* Queue set for control (config + sensors) */
     queue_set_control = xQueueCreateSet(15);
     xQueueAddToSet(queue_control_cmd, queue_set_control);
@@ -635,6 +619,26 @@ esp_err_t app_tasks_init(void)
 
     /* Initialize I2C bus. Set ESP32 as master. */
     hal_i2c_init();
+    vTaskDelay(pdMS_TO_TICKS(200U)); // Wait for system to stabilize
+
+    /* Initialize OLED screen. Set as I2C slave. */
+    oled_init();
+    vTaskDelay(pdMS_TO_TICKS(200U)); // Wait for system to stabilize
+
+    /* Initialize rotary encoder */
+    rotary_encoder_init();
+    vTaskDelay(pdMS_TO_TICKS(200U)); // Wait for system to stabilize
+
+    /* Initialize HC-SR04 sensors */
+    hcsr04_init();
+    hcsr04_start_periodic_trigger();
+    vTaskDelay(pdMS_TO_TICKS(200U)); // Wait for system to stabilize
+
+    /* Initialize RGB leds: FWD and BWD */
+    rgb_led_init();
+    rgb_led_set_backward(RGB_BWD_HALF_BRIGHT_RED); // Initial state for backward LED
+    rgb_led_set_forward(RGB_FWD_OFF);              // Initial state for forward LED
+    vTaskDelay(pdMS_TO_TICKS(200U)); // Wait for system to stabilize
 
     /* Initialize motor controller over I2C. */
     err = motor_ctrl_init();
@@ -643,26 +647,28 @@ esp_err_t app_tasks_init(void)
         ESP_LOGE(TAG, "Motor controller init failed");
         return err;
     }
+    /* Timer-based polling of motor speed (100ms). */
+    motor_poll_timer = xTimerCreate("motor_poll",
+                                    MOTOR_POLL_INTERVAL_TICKS,
+                                    pdTRUE,
+                                    NULL,
+                                    motor_poll_timer_cb);
+
+        if (motor_poll_timer == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create motor poll timer");
+        return ESP_FAIL;
+    }
+    if (xTimerStart(motor_poll_timer, 0) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to start motor poll timer");
+        return ESP_FAIL;
+    }
     queue_motor_responses = motor_ctrl_get_response_queue();
     if (queue_set_oled_updates != NULL && queue_motor_responses != NULL)
     {
-        (void)xQueueAddToSet(queue_motor_responses, queue_set_oled_updates);
+      (void)xQueueAddToSet(queue_motor_responses, queue_set_oled_updates);
     }
-
-    /* Initialize OLED screen. Set as I2C slave. */
-    oled_init();
-
-    /* Initialize rotary encoder */
-    rotary_encoder_init();
-
-    /* Initialize HC-SR04 sensors */
-    hcsr04_init();
-    hcsr04_start_periodic_trigger();
-
-    /* Initialize RGB leds: FWD and BWD */
-    rgb_led_init();
-    rgb_led_set_backward(RGB_BWD_HALF_BRIGHT_RED); // Initial state for backward LED
-    rgb_led_set_forward(RGB_FWD_OFF);              // Initial state for forward LED
  
     /* Create application tasks pinned to specific cores. */
     ok = xTaskCreatePinnedToCore(input_task, "input_task", INPUT_TASK_STACK_SIZE, NULL, INPUT_TASK_PRIORITY, NULL, CORE_IO);
