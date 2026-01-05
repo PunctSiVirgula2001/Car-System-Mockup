@@ -129,3 +129,19 @@ Fișier relevant: `main/tasks/app_tasks.c`
 
 După implementarea acestor părți, proiectul va putea folosi hardware‑ul existent pentru a simula comportamentul „mașinuței” (citire distanță, reacție la obstacole, control viteze și direcții, feedback vizual pe LED‑uri și OLED).
 
+## 7. Stadiul Saptamana 12
+
+- Driverele HC‑SR04, RGB LED, encoder rotativ și motor I2C sunt integrate în build‑ul aplicației și inițializate în `app_tasks_init()`, astfel încât toate modulele pornesc în aceeași secvență de boot.
+- Task‑urile FreeRTOS sunt acum completate (nu mai sunt simple schelete) și separate pe fluxuri clare: `input_task` (encoder), `sensors_task` (HC‑SR04), `control_task` (decizii și comenzi), `motor_task` (I2C către dsPIC), `ui_task` (OLED). Comunicarea se face prin cozi și queue‑set‑uri dedicate (`queue_set_sensors`, `queue_set_control`, `queue_set_motor`, `queue_set_oled_updates`) pentru a sincroniza rapid evenimentele.
+- `input_task` citește evenimentele de la encoder, aplică debounce software și actualizează starea de configurare (SP/HL/REV), apoi o publică atât către UI, cât și către control.
+- `sensors_task` primește măsurători de la HC‑SR04, normalizează distanțele, calculează `emergency_brake` și emite evenimente pentru control și UI în funcție de direcția activă.
+- `control_task` centralizează starea (encoder + senzori), aplică logica de frână de urgență și decide ce comenzi se trimit către motor și LED‑uri.
+- `motor_task` execută comenzile către motor și gestionează interogările periodice, trimițând răspunsuri către UI pentru partea de debug.
+- `ui_task` agregă update‑uri din input, senzori și motor și reafișează OLED‑ul cu valorile curente și statusul de siguranță.
+- Task‑urile sunt pin‑uite pe nuclee pentru a separa I/O de logica de control: input/UI rulează pe core‑ul de I/O, iar senzori/control/motor pe core‑ul de performanță.
+- Encoder‑ul rotativ și UI‑ul formează un meniu minimalist pentru `SP` (setpoint viteză), `HL` (headlights) și `REV` (reverse). Butonul comută între selecție și ajustare, iar rotația navighează/ajustează valorile; starea este publicată către UI și control pentru a menține ecranul și logica sincronizate.
+- HC‑SR04 furnizează distanțe față/spate, iar UI‑ul actualizează bar‑graph‑ul în funcție de direcția de mers: când `REV` este ON se folosește senzorul din spate, altfel cel din față. Bara se umple proporțional cu distanța (obstacol mai departe → bară mai plină), cu plafonare la o distanță maximă pentru stabilitate vizuală.
+- HC‑SR04 controlează și stop‑urile spate: când distanța scade sub pragul `HCSR04_DISTANCE_TO_STOP_CM` se activează `emergency_brake`, iar LED‑urile trec de la un dimming redus la roșu maxim. La revenirea într‑o zonă sigură, LED‑urile revin la intensitatea redusă.
+- Logica de control orchestrează farurile, direcția și viteza pe baza comenzilor din encoder, respectând condiția de frână de urgență. Comenzile de viteză/direcție sunt propagate către motor, iar schimbările de stare sunt reflectate în UI.
+- UI‑ul de debug afișează `ACT.SP` (viteza actuală) și `EMR.BR` (starea frânei) pe baza răspunsurilor primite de la motor; interogarea se face periodic prin mecanismul de polling.
+- Comunicarea I2C cu dsPIC este încă experimentală și nu este stabilă; integrarea logică este prezentă, dar validarea protocolului și consistența telemetriei sunt ținte pentru următorul stadiu (săptămâna 14).
